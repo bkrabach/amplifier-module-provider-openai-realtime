@@ -1,0 +1,142 @@
+# OpenAI Realtime Provider Configuration Examples
+
+# Basic configuration (minimal)
+basic:
+  session:
+    orchestrator: loop-streaming
+    context: context-simple
+  providers:
+    - module: provider-openai-realtime
+      source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+      config:
+        api_key: ${OPENAI_API_KEY}
+        voice: alloy
+
+# Full configuration (all options)
+full:
+  session:
+    orchestrator: loop-streaming
+    context: context-simple
+  providers:
+    - module: provider-openai-realtime
+      source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+      config:
+        api_key: ${OPENAI_API_KEY}
+        model: gpt-4o-realtime-preview-2024-12-17
+        voice: alloy
+        temperature: 0.7
+        max_tokens: 500
+        session_config:
+          turn_detection:
+            type: server_vad
+            threshold: 0.5
+
+# With tools (function calling)
+with_tools:
+  session:
+    orchestrator: loop-streaming
+    context: context-simple
+  providers:
+    - module: provider-openai-realtime
+      source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+      config:
+        api_key: ${OPENAI_API_KEY}
+        voice: marin  # Professional voice
+        temperature: 0.6
+  tools:
+    - module: tool-filesystem
+      source: git+https://github.com/microsoft/amplifier-module-tool-filesystem@main
+    - module: tool-web
+      source: git+https://github.com/microsoft/amplifier-module-tool-web@main
+
+# Cost-optimized (mini model)
+cost_optimized:
+  session:
+    orchestrator: loop-basic
+    context: context-simple
+  providers:
+    - module: provider-openai-realtime
+      source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+      config:
+        api_key: ${OPENAI_API_KEY}
+        model: gpt-4o-mini-realtime-preview-2024-12-17
+        voice: echo
+        temperature: 0.5
+        max_tokens: 250
+
+# Different voices showcase
+voice_variants:
+  alloy:  # Neutral and balanced
+    session:
+      orchestrator: loop-streaming
+      context: context-simple
+    providers:
+      - module: provider-openai-realtime
+        source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+        config:
+          api_key: ${OPENAI_API_KEY}
+          voice: alloy
+
+  echo:  # Warm and engaging
+    session:
+      orchestrator: loop-streaming
+      context: context-simple
+    providers:
+      - module: provider-openai-realtime
+        source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+        config:
+          api_key: ${OPENAI_API_KEY}
+          voice: echo
+
+  shimmer:  # Energetic and expressive
+    session:
+      orchestrator: loop-streaming
+      context: context-simple
+    providers:
+      - module: provider-openai-realtime
+        source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+        config:
+          api_key: ${OPENAI_API_KEY}
+          voice: shimmer
+
+  marin:  # Professional and clear (realtime-exclusive)
+    session:
+      orchestrator: loop-streaming
+      context: context-simple
+    providers:
+      - module: provider-openai-realtime
+        source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+        config:
+          api_key: ${OPENAI_API_KEY}
+          voice: marin
+
+  cedar:  # Natural and conversational (realtime-exclusive)
+    session:
+      orchestrator: loop-streaming
+      context: context-simple
+    providers:
+      - module: provider-openai-realtime
+        source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+        config:
+          api_key: ${OPENAI_API_KEY}
+          voice: cedar
+
+# Development/testing configuration
+development:
+  session:
+    orchestrator: loop-streaming
+    context: context-simple
+  providers:
+    - module: provider-openai-realtime
+      source: git+https://github.com/robotdad/amplifier-module-provider-openai-realtime@main
+      config:
+        api_key: ${OPENAI_API_KEY}
+        model: gpt-4o-realtime-preview-2024-12-17
+        voice: alloy
+        temperature: 0.8  # Higher for more varied responses
+  hooks:
+    - module: hooks-logging
+      source: git+https://github.com/microsoft/amplifier-module-hooks-logging@main
+      config:
+        log_level: debug
+        log_audio_metadata: true  # Log audio sizes, not data

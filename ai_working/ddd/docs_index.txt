@@ -1,0 +1,12 @@
+[x] README.md
+[x] docs/ARCHITECTURE.md
+[x] docs/API_CONTRACT.md
+[x] docs/AUDIO_FORMAT.md
+[x] docs/SESSION_LIFECYCLE.md
+[x] docs/FUNCTION_CALLING.md
+[x] docs/EXAMPLES.md
+[x] CHANGELOG.md
+[x] examples/basic_conversation.py
+[x] examples/with_tools.py
+[x] examples/config_examples.yaml
+[x] pyproject.toml
