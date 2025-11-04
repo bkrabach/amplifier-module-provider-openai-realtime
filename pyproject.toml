@@ -27,12 +27,13 @@ build-backend = "hatchling.build"
 package = true
 
 [tool.hatch.build.targets.wheel]
-packages = [
-    "amplifier_module_provider_openai_realtime",
-]
+packages = ["src/amplifier_module_provider_openai_realtime"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [dependency-groups]
-dev = ["pytest>=8.4.2"]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+]

@@ -4,6 +4,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 from typing import Any
+from typing import Union
 
 from .audio_codec import validate_audio_format
 from .exceptions import AudioFormatError
@@ -11,6 +12,7 @@ from .exceptions import WebSocketConnectionError
 from .session_mgmt import SessionManager
 
 if TYPE_CHECKING:
+    from amplifier_core.message_models import ChatRequest
     from amplifier_core.models import ProviderResponse
     from amplifier_core.models import ToolCall
 
@@ -50,7 +52,7 @@ class OpenAIRealtimeProvider:
         self.config = config
 
     async def complete(
-        self: "OpenAIRealtimeProvider", messages: list[dict[str, Any]], **kwargs: Any
+        self: "OpenAIRealtimeProvider", messages: Union[list[dict[str, Any]], "ChatRequest"], **kwargs: Any
     ) -> "ProviderResponse":
         """Generate completion from messages.
 
@@ -63,7 +65,7 @@ class OpenAIRealtimeProvider:
         6. Build ProviderResponse with audio in raw field
 
         Args:
-            messages: Message list in Amplifier format
+            messages: Message list in Amplifier format or ChatRequest object
             **kwargs: Additional parameters (unused)
 
         Returns:
@@ -73,33 +75,65 @@ class OpenAIRealtimeProvider:
             AudioFormatError: Invalid audio format
             WebSocketConnectionError: Connection failed
         """
-        from amplifier_core.message_models import TextBlock
+        from amplifier_core.content_models import TextContent
+        from amplifier_core.message_models import ChatRequest
         from amplifier_core.models import ProviderResponse
 
-        instructions = self._extract_instructions(messages)
+        # Handle ChatRequest format (from orchestrator)
+        if isinstance(messages, ChatRequest):
+            message_dicts = [
+                {"role": msg.role if isinstance(msg.role, str) else msg.role.value, "content": msg.content}
+                for msg in messages.messages
+            ]
+        else:
+            message_dicts = messages
+
+        instructions = self._extract_instructions(message_dicts)
         connection = None
 
         try:
-            self.coordinator.emit(
-                "provider:request",
-                {
-                    "provider": self.name,
-                    "model": self.config.get("model", "gpt-4o-realtime-preview-2024-12-17"),
-                    "messages": messages,
-                },
-            )
+            if self.coordinator and hasattr(self.coordinator, "hooks"):
+                await self.coordinator.hooks.emit(
+                    "provider:request",
+                    {
+                        "provider": self.name,
+                        "model": self.config.get("model", "gpt-4o-realtime-preview-2024-12-17"),
+                        "messages": message_dicts,
+                    },
+                )
 
             connection = await self.session_manager.get_or_create_connection()
 
             await self.session_manager.ensure_session_initialized(instructions)
 
-            audio_data = self._extract_audio(messages)
+            # Extract content from last user message (text or audio)
+            last_user_msg = next((msg for msg in reversed(message_dicts) if msg.get("role") == "user"), None)
 
-            validate_audio_format(audio_data)
+            if not last_user_msg:
+                raise ValueError("No user message found in messages")
 
-            await connection.send_audio(audio_data)
+            content = last_user_msg.get("content", "")
 
-            response = await connection.receive_audio()
+            # Handle text input (send as text, OpenAI responds with audio)
+            if isinstance(content, str):
+                await connection.send(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": content}],
+                        },
+                    }
+                )
+                await connection.send({"type": "response.create"})
+                response = await connection.receive_audio()
+            else:
+                # Handle audio input
+                audio_data = self._extract_audio(message_dicts)
+                validate_audio_format(audio_data)
+                await connection.send_audio(audio_data)
+                response = await connection.receive_audio()
 
             tool_calls = self._parse_tool_calls_from_ws_response(response["full_response"])
 
@@ -115,18 +149,19 @@ class OpenAIRealtimeProvider:
                 },
                 usage=self._extract_usage(response["full_response"]),
                 tool_calls=tool_calls if tool_calls else None,
-                content_blocks=[TextBlock(text=response["transcript"])],
+                content_blocks=[TextContent(text=response["transcript"])],
             )
 
-            self.coordinator.emit(
-                "provider:response",
-                {
-                    "provider": self.name,
-                    "model": self.config.get("model", "gpt-4o-realtime-preview-2024-12-17"),
-                    "response": provider_response,
-                    "session_id": self.session_manager.session_id,
-                },
-            )
+            if self.coordinator and hasattr(self.coordinator, "hooks"):
+                await self.coordinator.hooks.emit(
+                    "provider:response",
+                    {
+                        "provider": self.name,
+                        "model": self.config.get("model", "gpt-4o-realtime-preview-2024-12-17"),
+                        "response": provider_response,
+                        "session_id": self.session_manager.session_id,
+                    },
+                )
 
             return provider_response
 
@@ -134,24 +169,27 @@ class OpenAIRealtimeProvider:
             if connection:
                 self.session_manager.mark_broken(connection)
 
-            self.coordinator.emit(
-                "provider:error",
-                {"provider": self.name, "error_type": "WebSocketConnectionError", "error_message": str(e)},
-            )
+            if self.coordinator and hasattr(self.coordinator, "hooks"):
+                await self.coordinator.hooks.emit(
+                    "provider:error",
+                    {"provider": self.name, "error_type": "WebSocketConnectionError", "error_message": str(e)},
+                )
             raise
 
         except AudioFormatError as e:
-            self.coordinator.emit(
-                "provider:validation_error",
-                {"provider": self.name, "error_type": "AudioFormatError", "error_message": str(e)},
-            )
+            if self.coordinator and hasattr(self.coordinator, "hooks"):
+                await self.coordinator.hooks.emit(
+                    "provider:validation_error",
+                    {"provider": self.name, "error_type": "AudioFormatError", "error_message": str(e)},
+                )
             raise
 
         except Exception as e:
-            self.coordinator.emit(
-                "provider:error",
-                {"provider": self.name, "error_type": type(e).__name__, "error_message": str(e)},
-            )
+            if self.coordinator and hasattr(self.coordinator, "hooks"):
+                await self.coordinator.hooks.emit(
+                    "provider:error",
+                    {"provider": self.name, "error_type": type(e).__name__, "error_message": str(e)},
+                )
             raise
 
     def parse_tool_calls(self: "OpenAIRealtimeProvider", response: "ProviderResponse") -> list["ToolCall"]:

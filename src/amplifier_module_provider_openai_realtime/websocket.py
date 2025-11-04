@@ -39,7 +39,7 @@ class RealtimeWebSocket:
         headers = {"Authorization": f"Bearer {api_key}", "OpenAI-Beta": "realtime=v1"}
 
         try:
-            self.ws = await websockets.connect(url, extra_headers=headers)
+            self.ws = await websockets.connect(url, additional_headers=headers)
         except Exception as e:
             raise WebSocketConnectionError(f"Failed to connect to {url}: {e}") from e
 
@@ -47,9 +47,9 @@ class RealtimeWebSocket:
         """Check if WebSocket connection is active.
 
         Returns:
-            bool: True if connected and not closed
+            bool: True if connection exists
         """
-        return self.ws is not None and not self.ws.closed
+        return self.ws is not None
 
     async def send(self, message: dict[str, Any]) -> None:
         """Send JSON message to WebSocket.
@@ -218,7 +218,8 @@ class RealtimeWebSocket:
 
         response = await self.receive()
 
-        if response.get("type") == "session.updated":
+        # Accept either session.created or session.updated
+        if response.get("type") in ("session.created", "session.updated"):
             self.session_id = response.get("session", {}).get("id")
             if self.session_id:
                 return self.session_id
@@ -231,7 +232,7 @@ class RealtimeWebSocket:
         Sends close frame and waits for acknowledgment.
         Safe to call multiple times.
         """
-        if self.ws and not self.ws.closed:
+        if self.ws:
             try:
                 await self.ws.close()
             except Exception:
