@@ -9,6 +9,7 @@ authors = [
     { name = "Microsoft MADE:Explorations Team" },
 ]
 dependencies = [
+    "numpy>=2.3.4",
     "openai>=1.0.0",
     "websockets>=12.0",
 ]
