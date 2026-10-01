@@ -13,8 +13,8 @@ from .session_mgmt import SessionManager
 
 if TYPE_CHECKING:
     from amplifier_core.message_models import ChatRequest
-    from amplifier_core.models import ProviderResponse
-    from amplifier_core.models import ToolCall
+    from amplifier_core.message_models import ChatResponse as ProviderResponse
+    from amplifier_core.message_models import ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,25 @@ class OpenAIRealtimeProvider:
         self.session_manager = SessionManager(api_key, config)
         self.coordinator = coordinator
         self.config = config
+        self.raw = config.get("raw", False)
+        if type(self.raw) is not bool:
+            raise ValueError("raw must be a boolean")
+
+    def get_info(self):
+        from amplifier_core import ProviderInfo
+
+        return ProviderInfo(
+            id=self.name,
+            display_name="OpenAI Realtime",
+            credential_env_vars=["OPENAI_API_KEY"],
+            capabilities=["audio", "tools"],
+            defaults={"model": self.config.get("model")},
+        )
+
+    async def list_models(self):
+        # No authoritative model catalog/context limits are implemented here.
+        # Returning no catalog permits explicit model entry without invented limits.
+        return []
 
     async def complete(
         self: "OpenAIRealtimeProvider", messages: Union[list[dict[str, Any]], "ChatRequest"], **kwargs: Any
@@ -75,9 +94,10 @@ class OpenAIRealtimeProvider:
             AudioFormatError: Invalid audio format
             WebSocketConnectionError: Connection failed
         """
-        from amplifier_core.content_models import TextContent
+        from amplifier_core.utils import redact_secrets
+        from amplifier_core.message_models import TextBlock, Usage
         from amplifier_core.message_models import ChatRequest
-        from amplifier_core.models import ProviderResponse
+        from amplifier_core.message_models import ChatResponse as ProviderResponse
 
         # Handle ChatRequest format (from orchestrator)
         if isinstance(messages, ChatRequest):
@@ -88,6 +108,19 @@ class OpenAIRealtimeProvider:
         else:
             message_dicts = messages
 
+        for message in message_dicts:
+            content = message.get("content")
+            if isinstance(content, list):
+                blocks = [
+                    block.model_dump() if hasattr(block, "model_dump") else block
+                    for block in content
+                ]
+                if blocks and all(block.get("type") == "text" for block in blocks):
+                    message["content"] = "\n".join(
+                        block.get("text", "") for block in blocks
+                    )
+                else:
+                    message["content"] = blocks
         instructions = self._extract_instructions(message_dicts)
         connection = None
 
@@ -101,6 +134,18 @@ class OpenAIRealtimeProvider:
                         "messages": message_dicts,
                     },
                 )
+
+            if self.coordinator and hasattr(self.coordinator, "hooks"):
+                event = {
+                    "provider": self.name,
+                    "model": self.config.get("model"),
+                    "message_count": len(message_dicts),
+                }
+                if self.raw:
+                    event["raw"] = redact_secrets(
+                        {"messages": message_dicts, "instructions": instructions}
+                    )
+                await self.coordinator.hooks.emit("llm:request", event)
 
             connection = await self.session_manager.get_or_create_connection()
 
@@ -137,8 +182,14 @@ class OpenAIRealtimeProvider:
 
             tool_calls = self._parse_tool_calls_from_ws_response(response["full_response"])
 
-            provider_response = ProviderResponse(
-                content=response["transcript"],
+            class RealtimeResponse(ProviderResponse):
+                # Preserve the direct caller audio accessor while satisfying the
+                # current typed provider contract. Audio is not plain-text context.
+                raw: dict[str, Any]
+
+            usage = self._extract_usage(response["full_response"])
+            provider_response = RealtimeResponse(
+                content=[TextBlock(text=response["transcript"])],
                 raw={
                     "audio_data": response["audio_data"],
                     "audio_format": "pcm16",
@@ -147,9 +198,13 @@ class OpenAIRealtimeProvider:
                     "session_id": self.session_manager.session_id or "",
                     "websocket_response": response["full_response"],
                 },
-                usage=self._extract_usage(response["full_response"]),
+                usage=Usage(
+                    input_tokens=usage["input_tokens"],
+                    output_tokens=usage["output_tokens"],
+                    total_tokens=usage["input_tokens"] + usage["output_tokens"],
+                ),
                 tool_calls=tool_calls if tool_calls else None,
-                content_blocks=[TextContent(text=response["transcript"])],
+                finish_reason="tool_calls" if tool_calls else "stop",
             )
 
             if self.coordinator and hasattr(self.coordinator, "hooks"):
@@ -160,6 +215,17 @@ class OpenAIRealtimeProvider:
                         "model": self.config.get("model", "gpt-4o-realtime-preview-2024-12-17"),
                         "response": provider_response,
                         "session_id": self.session_manager.session_id,
+                    },
+                )
+
+            if self.coordinator and hasattr(self.coordinator, "hooks"):
+                await self.coordinator.hooks.emit(
+                    "llm:response",
+                    {
+                        "provider": self.name,
+                        "model": self.config.get("model"),
+                        "status": "ok",
+                        "usage": provider_response.usage.model_dump(),
                     },
                 )
 
@@ -282,7 +348,10 @@ class OpenAIRealtimeProvider:
         """
         usage = ws_response.get("response", {}).get("usage", {})
 
-        return {"input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0)}
+        return {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        }
 
     def _parse_tool_calls_from_ws_response(
         self: "OpenAIRealtimeProvider", ws_response: dict[str, Any]
@@ -297,21 +366,33 @@ class OpenAIRealtimeProvider:
         Returns:
             list[ToolCall]: Parsed tool calls (empty if none)
         """
-        from amplifier_core.models import ToolCall
+        from amplifier_core.message_models import ToolCall
 
-        msg_type = ws_response.get("type", "")
-
-        if msg_type == "response.function_call_arguments.done":
-            call_id = ws_response.get("call_id")
-            name = ws_response.get("name")
-            arguments_str = ws_response.get("arguments", "{}")
-
+        # The receiver returns the terminal response.done envelope. Support the
+        # standalone arguments event for existing direct callers as well.
+        if ws_response.get("type") == "response.function_call_arguments.done":
+            items = [ws_response]
+        else:
+            items = [
+                item
+                for item in ws_response.get("response", {}).get("output", [])
+                if item.get("type") == "function_call"
+            ]
+        calls = []
+        for item in items:
             try:
-                arguments = json.loads(arguments_str)
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse tool call arguments: {arguments_str}")
-                arguments = {}
-
-            return [ToolCall(tool=name, arguments=arguments, id=call_id)]
-
-        return []
+                arguments = json.loads(item.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError) as exc:
+                # Never execute a malformed model call with fabricated empty args
+                # or echo its possibly sensitive argument payload to logs.
+                raise ValueError(
+                    "Realtime function arguments are not valid JSON"
+                ) from exc
+            if not isinstance(arguments, dict):
+                raise ValueError("Realtime function arguments must be an object")
+            calls.append(
+                ToolCall(
+                    name=item.get("name"), arguments=arguments, id=item.get("call_id")
+                )
+            )
+        return calls

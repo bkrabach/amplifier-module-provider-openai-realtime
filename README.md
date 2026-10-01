@@ -350,3 +350,9 @@ Any use of third-party trademarks or logos are subject to those third-party's po
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+### Core provider contract
+
+The adapter accepts Core 2.0.1 typed text requests and returns typed content, usage, and function calls. Direct callers retain `response.raw` for audio bytes and the original WebSocket response. `raw: true` adds optional redacted request capture to the standard LLM events; capture defaults to false. Model catalog limits are left unknown rather than invented.
+
+This update preserves the existing Realtime endpoint/session protocol. It does not qualify the current voice service, physical audio devices, or a newer Realtime wire protocol.
