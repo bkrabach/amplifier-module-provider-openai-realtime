@@ -94,7 +94,40 @@ async with AmplifierSession(config=config) as session:
     transcript = response.content  # Text transcript
 ```
 
-### Available Models
+### Compatibility boundary and model selection
+
+The receiver accepts documented `response.output_audio.*` and
+`response.output_audio_transcript.*` events as well as legacy `response.audio.*`
+and `response.audio_transcript.*` events. Each base64 delta is decoded separately,
+then PCM bytes are assembled in output/content order. Only matching
+`response.done` completes a turn; audio/transcript done events do not.
+
+Offline serialized-transcript tests exercise `complete()` through the real
+session manager and WebSocket adapter. They cover text/PCM input, session update
+confirmation, padded chunks, transcript/usage/tool output, adjacent turns,
+duplicate event IDs, unrelated response IDs, errors and cancellation. A cancelled
+or failed receive closes the connection before a subsequent turn can reuse it.
+Unknown event types do not fabricate audio. Conflicting duplicate events,
+malformed audio and unsuccessful terminal responses raise errors rather than
+report success. Legacy full-audio done payloads remain a fallback only when no
+deltas were received. The single-turn adapter does not multiplex responses.
+
+This is **receive-side compatibility**, not a complete GA protocol migration or
+live voice/model qualification. The outgoing connection still sends the beta
+header and the legacy top-level voice/temperature session configuration.
+[OpenAI's migration guide](https://developers.openai.com/api/docs/guides/realtime#beta-to-ga-migration)
+requires removal of that header and updated session types/audio configuration
+before GA use. Accepting new event names alone does not qualify a new model.
+
+`list_models()` therefore remains empty. Select a model explicitly with provider
+`config.model`; this connection-scoped selection is sent unchanged and is not
+replaced by a recommendation. Per-call `ChatRequest.model` switching is not
+implemented by this session-based adapter. No model availability or account
+entitlement is inferred from a name. The examples below are historical beta
+configuration examples, **not current recommendations**. No paid/live provider,
+microphone, audio playback, or live endpoint acceptance test was performed.
+
+### Historical beta model examples
 
 | Model | Status | Best For |
 |-------|---------|----------|

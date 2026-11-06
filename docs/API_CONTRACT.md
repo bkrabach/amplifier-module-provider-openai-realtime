@@ -2,6 +2,25 @@
 
 This document specifies how the OpenAI Realtime provider implements Amplifier's provider protocol.
 
+## Current implementation qualification
+
+The historical protocol examples below predate the Core 2 typed-response repair.
+The current implementation returns `ChatResponse` with `content: list[TextBlock]`,
+typed `Usage`/`ToolCall`, and the preserved `raw` audio accessor.
+
+The receiver now accepts current `response.output_audio.*` and
+`response.output_audio_transcript.*`, plus legacy `response.audio.*` and
+`response.audio_transcript.*` names.
+See the explicit [compatibility boundary](../README.md#compatibility-boundary-and-model-selection).
+Bytes come from individually decoded delta events, not the terminal response
+object. `response.done` is the turn boundary; it contains usage and tool outputs.
+`session.created` does not confirm a session update: the adapter waits for the
+matching `session.updated` before sending a conversation item.
+
+The offline tests prove serialized receive behavior, not current GA session
+request compatibility, provider entitlement, physical audio, or live service
+acceptance. The legacy outgoing session shape and beta header are unchanged.
+
 ## Provider Protocol
 
 The provider implements Amplifier's `Provider` protocol defined in `amplifier-core`:

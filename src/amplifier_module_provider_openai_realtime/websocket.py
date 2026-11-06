@@ -1,9 +1,9 @@
+import base64
 import json
 from typing import Any
 
 import websockets
 
-from .audio_codec import decode_base64_audio
 from .audio_codec import encode_base64_audio
 from .exceptions import SessionInitializationError
 from .exceptions import WebSocketConnectionError
@@ -24,6 +24,7 @@ class RealtimeWebSocket:
         """Initialize WebSocket handler with no active connection."""
         self.ws: Any = None
         self.session_id: str | None = None
+        self._completed_response_id: str | None = None
 
     async def connect(self, api_key: str, model: str) -> None:
         """Establish WebSocket connection to OpenAI Realtime API.
@@ -82,9 +83,12 @@ class RealtimeWebSocket:
 
         try:
             raw_message = await self.ws.recv()
-            return json.loads(raw_message)
-        except Exception as e:
-            raise WebSocketConnectionError(f"Receive failed: {e}") from e
+            message = json.loads(raw_message)
+            if not isinstance(message, dict) or not isinstance(message.get("type"), str):
+                raise ValueError("Invalid event envelope")
+            return message
+        except Exception:
+            raise WebSocketConnectionError("Realtime receive failed or returned an invalid event") from None
 
     async def send_audio(self, audio_data: bytes) -> None:
         """Send audio input frame to OpenAI.
@@ -116,7 +120,9 @@ class RealtimeWebSocket:
     async def receive_audio(self) -> dict[str, Any]:
         """Receive audio response from OpenAI.
 
-        Collects audio.delta chunks until audio.done, then decodes and returns.
+        Accept current output_audio and legacy audio event names. Only the
+        matching response.done ends a turn; audio.done is not turn completion.
+        Independently decode each base64 delta (padding may occur per chunk).
 
         Returns:
             dict: Response containing:
@@ -127,40 +133,106 @@ class RealtimeWebSocket:
         Raises:
             WebSocketConnectionError: If receive fails
         """
-        audio_chunks: list[str] = []
-        transcript = ""
+        audio: dict[tuple[int, int], list[bytes]] = {}
+        transcripts: dict[tuple[int, int], str] = {}
+        audio_done: set[tuple[int, int]] = set()
+        transcript_done: set[tuple[int, int]] = set()
+        seen: dict[str, dict[str, Any]] = {}
+        response_id: str | None = None
         response_data: dict[str, Any] = {}
 
         while True:
             message = await self.receive()
             msg_type = message.get("type", "")
-
-            if msg_type == "response.audio.delta":
-                audio_chunks.append(message.get("delta", ""))
-
-            elif msg_type == "response.audio.done":
-                full_audio = message.get("audio", "")
-                if full_audio:
-                    audio_chunks = [full_audio]
-
-            elif msg_type == "response.audio_transcript.delta":
-                transcript += message.get("delta", "")
-
-            elif msg_type == "response.audio_transcript.done":
-                transcript = message.get("transcript", transcript)
-
-            elif msg_type == "response.done":
+            if msg_type == "error":
+                raise WebSocketConnectionError("OpenAI Realtime returned an error")
+            # Other events (rate limits, item notifications, unknown extensions)
+            # are not audio or terminal envelopes and must not fabricate output.
+            canonical = msg_type.replace("response.output_audio", "response.audio", 1)
+            if canonical not in {
+                "response.created", "response.done", "response.audio.delta",
+                "response.audio.done", "response.audio_transcript.delta",
+                "response.audio_transcript.done",
+            }:
+                continue
+            event_response = message.get("response", {})
+            if canonical in {"response.created", "response.done"}:
+                if not isinstance(event_response, dict):
+                    raise WebSocketConnectionError("Invalid Realtime response envelope")
+                incoming_id = event_response.get("id")
+            else:
+                incoming_id = message.get("response_id")
+            if incoming_id is not None and (not isinstance(incoming_id, str) or not incoming_id):
+                raise WebSocketConnectionError("Invalid Realtime response identity")
+            if incoming_id and incoming_id == self._completed_response_id:
+                continue  # A duplicate previous terminal/event cannot end the next turn.
+            if response_id is not None and incoming_id != response_id:
+                continue  # Never mix bytes or a terminal envelope from another response.
+            if incoming_id is not None:
+                response_id = incoming_id
+            event_id = message.get("event_id")
+            if event_id is not None:
+                if not isinstance(event_id, str) or not event_id:
+                    raise WebSocketConnectionError("Invalid Realtime event identity")
+                if event_id in seen:
+                    if seen[event_id] != message:
+                        raise WebSocketConnectionError("Conflicting duplicate Realtime event")
+                    continue
+                seen[event_id] = message
+            if canonical == "response.created":
+                continue
+            if canonical == "response.done":
+                if event_response.get("status") not in (None, "completed"):
+                    raise WebSocketConnectionError("Realtime response did not complete successfully")
                 response_data = message
+                self._completed_response_id = response_id
                 break
+            key = (message.get("output_index", 0), message.get("content_index", 0))
+            if any(type(index) is not int or index < 0 for index in key):
+                raise WebSocketConnectionError("Invalid Realtime content index")
+            if canonical == "response.audio.delta":
+                if key in audio_done:
+                    raise WebSocketConnectionError("Realtime audio delta after audio.done")
+                audio.setdefault(key, []).append(self._decode_audio(message.get("delta")))
+            elif canonical == "response.audio.done":
+                # Documented done events carry no audio bytes. Keep the legacy
+                # full-audio extension only as a fallback when no deltas arrived.
+                if key not in audio and message.get("audio"):
+                    audio[key] = [self._decode_audio(message["audio"])]
+                audio_done.add(key)
+            elif canonical == "response.audio_transcript.delta":
+                if key in transcript_done:
+                    raise WebSocketConnectionError("Realtime transcript delta after transcript.done")
+                delta = message.get("delta")
+                if not isinstance(delta, str):
+                    raise WebSocketConnectionError("Invalid Realtime transcript delta")
+                transcripts[key] = transcripts.get(key, "") + delta
+            elif canonical == "response.audio_transcript.done":
+                transcript = message.get("transcript")
+                if not isinstance(transcript, str):
+                    raise WebSocketConnectionError("Invalid Realtime transcript")
+                if key in transcript_done and transcripts[key] != transcript:
+                    raise WebSocketConnectionError("Conflicting Realtime transcript.done")
+                transcripts[key] = transcript
+                transcript_done.add(key)
 
-            elif msg_type == "error":
-                error_msg = message.get("error", {})
-                raise WebSocketConnectionError(f"OpenAI error: {error_msg.get('message', 'Unknown error')}")
+        audio_data = b"".join(chunk for key in sorted(audio) for chunk in audio[key])
+        if len(audio_data) % 2:
+            raise WebSocketConnectionError("Invalid PCM16 response (odd byte length)")
+        return {
+            "audio_data": audio_data,
+            "transcript": "".join(transcripts[key] for key in sorted(transcripts)),
+            "full_response": response_data,
+        }
 
-        combined_audio_b64 = "".join(audio_chunks)
-        audio_data = decode_base64_audio(combined_audio_b64) if combined_audio_b64 else b""
-
-        return {"audio_data": audio_data, "transcript": transcript, "full_response": response_data}
+    @staticmethod
+    def _decode_audio(value: Any) -> bytes:
+        if not isinstance(value, str):
+            raise WebSocketConnectionError("Invalid Realtime audio delta")
+        try:
+            return base64.b64decode(value, validate=True)
+        except ValueError:
+            raise WebSocketConnectionError("Invalid Realtime base64 audio") from None
 
     async def send_tool_result(self, tool_result: dict[str, Any]) -> None:
         """Send tool execution result to OpenAI.
@@ -216,15 +288,23 @@ class RealtimeWebSocket:
             }
         )
 
-        response = await self.receive()
-
-        # Accept either session.created or session.updated
-        if response.get("type") in ("session.created", "session.updated"):
-            self.session_id = response.get("session", {}).get("id")
-            if self.session_id:
-                return self.session_id
-
-        raise SessionInitializationError(f"Session initialization failed: {response}")
+        created_id = None
+        while True:
+            response = await self.receive()
+            kind = response.get("type")
+            if kind == "error":
+                raise SessionInitializationError("OpenAI Realtime rejected session configuration")
+            if kind not in ("session.created", "session.updated"):
+                raise SessionInitializationError("Unexpected event during session initialization")
+            session = response.get("session")
+            identity = session.get("id") if isinstance(session, dict) else None
+            if not isinstance(identity, str) or not identity or (created_id and identity != created_id):
+                raise SessionInitializationError("Invalid Realtime session identity")
+            if kind == "session.created":
+                created_id = identity
+                continue  # Creation is not confirmation that our configuration was applied.
+            self.session_id = identity
+            return identity
 
     async def close(self) -> None:
         """Close WebSocket connection gracefully.
@@ -240,3 +320,4 @@ class RealtimeWebSocket:
             finally:
                 self.ws = None
                 self.session_id = None
+                self._completed_response_id = None

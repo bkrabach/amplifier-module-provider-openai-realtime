@@ -1,5 +1,6 @@
 """OpenAI Realtime provider implementation."""
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -8,6 +9,7 @@ from typing import Union
 
 from .audio_codec import validate_audio_format
 from .exceptions import AudioFormatError
+from .exceptions import SessionInitializationError
 from .exceptions import WebSocketConnectionError
 from .session_mgmt import SessionManager
 
@@ -231,14 +233,21 @@ class OpenAIRealtimeProvider:
 
             return provider_response
 
-        except WebSocketConnectionError as e:
+        except asyncio.CancelledError:
+            # An interrupted receive leaves unread events. Never reuse that
+            # connection and attribute its remaining audio to the next turn.
+            await self.session_manager.cleanup()
+            raise
+
+        except (WebSocketConnectionError, SessionInitializationError) as e:
             if connection:
                 self.session_manager.mark_broken(connection)
+                await connection.close()
 
             if self.coordinator and hasattr(self.coordinator, "hooks"):
                 await self.coordinator.hooks.emit(
                     "provider:error",
-                    {"provider": self.name, "error_type": "WebSocketConnectionError", "error_message": str(e)},
+                    {"provider": self.name, "error_type": type(e).__name__, "error_message": str(e)},
                 )
             raise
 
