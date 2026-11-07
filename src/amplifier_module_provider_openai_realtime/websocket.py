@@ -289,11 +289,25 @@ class RealtimeWebSocket:
         )
 
         created_id = None
-        while True:
+        conversation_created = False
+        # At most: session.created, conversation.created, session.updated.
+        # Neither creation event confirms that our configuration was applied.
+        for _ in range(3):
             response = await self.receive()
             kind = response.get("type")
             if kind == "error":
                 raise SessionInitializationError("OpenAI Realtime rejected session configuration")
+            if kind == "conversation.created":
+                conversation = response.get("conversation")
+                event_id = response.get("event_id")
+                if (not created_id or conversation_created or not isinstance(conversation, dict)
+                        or not isinstance(event_id, str) or not event_id
+                        or (conversation.get("id") is not None
+                            and (not isinstance(conversation["id"], str) or not conversation["id"]))
+                        or conversation.get("object") not in (None, "realtime.conversation")):
+                    raise SessionInitializationError("Invalid Realtime conversation creation event")
+                conversation_created = True
+                continue
             if kind not in ("session.created", "session.updated"):
                 raise SessionInitializationError("Unexpected event during session initialization")
             session = response.get("session")
@@ -305,6 +319,7 @@ class RealtimeWebSocket:
                 continue  # Creation is not confirmation that our configuration was applied.
             self.session_id = identity
             return identity
+        raise SessionInitializationError("Session initialization did not confirm configuration")
 
     async def close(self) -> None:
         """Close WebSocket connection gracefully.

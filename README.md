@@ -389,3 +389,12 @@ MIT License - see [LICENSE](LICENSE) for details.
 The adapter accepts Core 2.0.1 typed text requests and returns typed content, usage, and function calls. Direct callers retain `response.raw` for audio bytes and the original WebSocket response. `raw: true` adds optional redacted request capture to the standard LLM events; capture defaults to false. Model catalog limits are left unknown rather than invented.
 
 This update preserves the existing Realtime endpoint/session protocol. It does not qualify the current voice service, physical audio devices, or a newer Realtime wire protocol.
+
+Initialization accepts the documented `session.created` → `conversation.created`
+→ `session.updated` sequence. Only `session.updated` confirms configuration.
+The intervening conversation event must have a valid envelope and can occur
+once, after session creation; its optional resource fields are validated when
+present. At most three initialization events are consumed. Unknown, malformed,
+error, or excess events fail closed. This is an offline protocol compatibility
+check, not a live beta handshake or GA migration. Caller cancellation/timeouts
+still close the connection; no new wall-clock timeout policy is introduced.
